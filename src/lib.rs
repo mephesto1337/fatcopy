@@ -4,9 +4,6 @@ use std::{
     path::Path,
 };
 
-use nom::Parser;
-use nom_bufreader::{bufreader::BufReader, Parse};
-
 use sha2::{Digest, Sha256};
 
 const BLOCK_SIZE: u64 = 4096;
@@ -15,9 +12,6 @@ const HASH_SIZE: usize = 32;
 mod protocol;
 use protocol::Wire;
 
-pub type Result<'a, T> =
-    ::std::result::Result<T, nom_bufreader::Error<nom::error::VerboseError<&'a [u8]>>>;
-
 #[derive(Debug)]
 pub struct FatCopy {
     file: File,
@@ -25,7 +19,7 @@ pub struct FatCopy {
 }
 
 impl FatCopy {
-    pub fn new(path: impl AsRef<Path>) -> Result<'static, Self> {
+    pub fn new(path: impl AsRef<Path>) -> io::Result<Self> {
         let file = File::options()
             .read(true)
             .write(true)
@@ -37,30 +31,54 @@ impl FatCopy {
         })
     }
 
-    fn send_wire<'a, S, T>(&'a mut self, stream: &mut BufReader<S>, obj: &T) -> Result<()>
+    fn send_wire<S, T>(&mut self, stream: &mut S, obj: &T) -> io::Result<()>
     where
-        T: Wire<'a>,
+        T: Wire,
         S: Write,
     {
-        obj.serialize(stream.get_mut())?;
+        obj.serialize(stream)?;
         Ok(())
     }
 
-    fn recv_wire<S, T, P>(stream: &mut BufReader<S>, mut p: P) -> Result<T>
+    fn recv_wire<S, T>(&mut self, stream: &mut S) -> io::Result<T>
     where
         S: Read,
-        for<'a> P: Parser<&'a [u8], T, nom::error::VerboseError<&'a [u8]>>,
+        T: Wire,
     {
-        stream.parse(|input| p.parse(input))
+        let mut buffer = vec![0u8; T::size_hint()];
+        stream.read_exact(&mut buffer[..])?;
+        loop {
+            match T::deserialize(&buffer[..]) {
+                Ok((rest, obj)) => {
+                    assert_eq!(rest.len(), 0);
+                    return Ok(obj);
+                }
+                Err(nom::Err::Incomplete(n)) => match n {
+                    nom::Needed::Unknown => todo!(),
+                    nom::Needed::Size(s) => {
+                        let offset = buffer.len();
+                        buffer.resize(offset + s.get(), 0);
+                        stream.read_exact(&mut buffer[offset..])?;
+                        continue;
+                    }
+                },
+                Err(nom::Err::Error(e)) | Err(nom::Err::Failure(e)) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("{e:#?}"),
+                    ));
+                }
+            }
+        }
     }
 
-    fn send_chunk<S>(&mut self, data: &[u8], stream: &mut BufReader<S>) -> Result<()>
+    fn send_chunk<S>(&mut self, data: &[u8], stream: &mut S) -> io::Result<()>
     where
         S: Write + Read,
     {
         let mut hasher = Sha256::new();
         let mut hash: sha2::digest::generic_array::GenericArray<_, _> = [0u8; HASH_SIZE].into();
-        hasher.update(&data[..]);
+        hasher.update(data);
         hasher.finalize_into(&mut hash);
         self.send_wire(
             stream,
@@ -69,27 +87,23 @@ impl FatCopy {
                 hash: hash.as_slice().into(),
             },
         )?;
-        let res = Self::recv_wire(stream, protocol::Ack::deserialize)?;
+        let res: protocol::Ack = self.recv_wire(stream)?;
         match res {
             protocol::Ack::Hash => {}
             protocol::Ack::NeedData => {
-                self.send_wire(stream, &protocol::Data(&data[..]))?;
+                self.send_wire(stream, &protocol::Data(data[..].into()))?;
             }
         }
         Ok(())
     }
 
-    fn recv_data<S>(
-        &mut self,
-        stream: &mut BufReader<S>,
-        hash: protocol::Hash<'static, HASH_SIZE>,
-    ) -> Result<u64>
+    fn recv_data<S>(&mut self, stream: &mut S, hash: protocol::Hash<HASH_SIZE>) -> io::Result<u64>
     where
         S: Read + Write,
     {
         self.send_wire(stream, &protocol::Ack::NeedData)?;
-        let data = Self::recv_wire(stream, protocol::Data::deserialize)?;
-        self.file.write_all(data.0)?;
+        let data: protocol::Data = self.recv_wire(stream)?;
+        self.file.write_all(&data.0)?;
         #[cfg(debug_assertions)]
         {
             let mut hasher = Sha256::new();
@@ -103,15 +117,14 @@ impl FatCopy {
         Ok(data.0.len() as u64)
     }
 
-    fn recv_chunk<S>(&mut self, stream: &mut BufReader<S>) -> Result<u64>
+    fn recv_chunk<S>(&mut self, stream: &mut S) -> io::Result<u64>
     where
         S: Read + Write,
     {
         let mut hasher = Sha256::new();
         let mut hash: sha2::digest::generic_array::GenericArray<_, _> = [0u8; HASH_SIZE].into();
         let mut buffer = [0u8; BLOCK_SIZE as usize];
-        let remote =
-            Self::recv_wire(stream, protocol::Hash::<HASH_SIZE>::deserialize)?.into_owned();
+        let remote: protocol::Hash<HASH_SIZE> = self.recv_wire(stream)?;
 
         if self.has_reached_eof {
             return self.recv_data(stream, remote);
@@ -137,13 +150,13 @@ impl FatCopy {
                     self.file.seek(SeekFrom::Start(position))?;
                     self.recv_data(stream, remote)
                 } else {
-                    Err(e.into())
+                    Err(e)
                 }
             }
         }
     }
 
-    pub fn send<S>(&mut self, stream: &mut BufReader<S>) -> Result<()>
+    pub fn send<S>(&mut self, stream: &mut S) -> io::Result<()>
     where
         S: Read + Write,
     {
@@ -164,11 +177,11 @@ impl FatCopy {
         Ok(())
     }
 
-    pub fn recv<S>(&mut self, stream: &mut BufReader<S>) -> Result<()>
+    pub fn recv<S>(&mut self, stream: &mut S) -> io::Result<()>
     where
         S: Read + Write,
     {
-        let filesize = Self::recv_wire(stream, protocol::FileSize::deserialize)?;
+        let filesize: protocol::FileSize = self.recv_wire(stream)?;
         let mut offset = 0;
 
         while offset < filesize.0 {

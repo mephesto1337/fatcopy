@@ -15,10 +15,10 @@ use nom::{
 
 pub type IResult<'a, O> = nom::IResult<&'a [u8], O, nom::error::VerboseError<&'a [u8]>>;
 
-pub trait Wire<'a>: Sized {
-    fn deserialize(input: &'a [u8]) -> IResult<'a, Self>;
+pub trait Wire: Sized {
+    fn deserialize(input: &[u8]) -> IResult<'_, Self>;
 
-    fn min_size() -> usize;
+    fn size_hint() -> usize;
 
     fn serialize<W>(&self, writer: &mut W) -> io::Result<()>
     where
@@ -38,15 +38,15 @@ const VARIANT_ACK: u8 = 3;
 #[derive(Debug)]
 pub struct FileSize(pub u64);
 
-impl<'a> Wire<'a> for FileSize {
-    fn deserialize(input: &'a [u8]) -> IResult<'a, Self> {
+impl Wire for FileSize {
+    fn deserialize(input: &[u8]) -> IResult<'_, Self> {
         context(
             "Filesize",
             preceded(verify(be_u8, |v| *v == VARIANT_FILESIZE), map(be_u64, Self)),
         )(input)
     }
 
-    fn min_size() -> usize {
+    fn size_hint() -> usize {
         size_of_val(&VARIANT_FILESIZE) + size_of::<u64>()
     }
 
@@ -72,22 +72,24 @@ pub struct Hash<'a, const N: usize> {
     pub hash: Cow<'a, [u8]>,
 }
 
-impl<'a, const N: usize> Wire<'a> for Hash<'a, N> {
-    fn deserialize(input: &'a [u8]) -> IResult<'a, Self> {
+impl<const N: usize> Wire for Hash<'_, N> {
+    fn deserialize<'a>(input: &'a [u8]) -> IResult<'a, Self> {
         context(
             "Hash",
             preceded(
                 verify(be_u8, |v| *v == VARIANT_HASH),
-                map(tuple((be_u32, take(N))), |(size, hash)| Self {
-                    size,
-                    hash: Cow::Borrowed(hash),
+                map(tuple((be_u32::<&'a [u8], _>, take(N))), |(size, hash)| {
+                    Self {
+                        size,
+                        hash: Cow::Owned(hash.to_vec()),
+                    }
                 }),
             ),
         )(input)
     }
 
-    fn min_size() -> usize {
-        1 + size_of::<u32>() + N
+    fn size_hint() -> usize {
+        size_of_val(&VARIANT_HASH) + size_of::<u32>() + N
     }
 
     fn serialize<W>(&self, writer: &mut W) -> io::Result<()>
@@ -106,30 +108,23 @@ impl<'a, const N: usize> Wire<'a> for Hash<'a, N> {
     }
 }
 
-impl<'a, const N: usize> Hash<'a, N> {
-    pub fn into_owned(self) -> Hash<'static, N> {
-        Hash {
-            size: self.size,
-            hash: Cow::Owned(self.hash.into_owned()),
-        }
-    }
-}
-
 #[derive(Debug)]
-pub struct Data<'a>(pub &'a [u8]);
+pub struct Data<'a>(pub Cow<'a, [u8]>);
 
-impl<'a> Wire<'a> for Data<'a> {
-    fn deserialize(input: &'a [u8]) -> IResult<'a, Self> {
+impl Wire for Data<'_> {
+    fn deserialize(input: &[u8]) -> IResult<'_, Self> {
         context(
             "Data",
             preceded(
                 verify(be_u8, |v| *v == VARIANT_DATA),
-                map(length_data(be_u32), |data| Self(data)),
+                map(length_data(be_u32), |data: &[u8]| {
+                    Self(data.to_vec().into())
+                }),
             ),
         )(input)
     }
 
-    fn min_size() -> usize {
+    fn size_hint() -> usize {
         size_of_val(&VARIANT_DATA) + size_of::<u32>()
     }
 
@@ -142,7 +137,7 @@ impl<'a> Wire<'a> for Data<'a> {
         let size: u32 = self.0.len().try_into().expect("Buffer is over 4GB?!");
         header[1..].copy_from_slice(&size.to_be_bytes()[..]);
         writer.write_all(&header[..])?;
-        writer.write_all(self.0)
+        writer.write_all(&self.0)
     }
 }
 
@@ -152,8 +147,8 @@ pub enum Ack {
     NeedData,
 }
 
-impl<'a> Wire<'a> for Ack {
-    fn deserialize(input: &'a [u8]) -> IResult<'a, Self> {
+impl Wire for Ack {
+    fn deserialize(input: &[u8]) -> IResult<'_, Self> {
         context(
             "Ack",
             preceded(
@@ -167,7 +162,7 @@ impl<'a> Wire<'a> for Ack {
         )(input)
     }
 
-    fn min_size() -> usize {
+    fn size_hint() -> usize {
         2
     }
 
