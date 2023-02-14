@@ -7,36 +7,16 @@ use std::{
 use nom::{
     bytes::streaming::take,
     combinator::{map, map_opt, verify},
-    error::{context, ContextError, ParseError},
+    error::context,
     multi::length_data,
     number::streaming::{be_u32, be_u64, be_u8},
     sequence::{preceded, tuple},
 };
 
-pub enum CanDeserialize {
-    Yes { consumed: usize },
-    Incomplete(nom::Needed),
-    No,
-}
-
-pub trait NomError<'a>: ParseError<&'a [u8]> + ContextError<&'a [u8]> {}
-
-impl<'a, E> NomError<'a> for E where E: ParseError<&'a [u8]> + ContextError<&'a [u8]> {}
+pub type IResult<'a, O> = nom::IResult<&'a [u8], O, nom::error::VerboseError<&'a [u8]>>;
 
 pub trait Wire<'a>: Sized {
-    fn deserialize<E>(input: &'a [u8]) -> nom::IResult<&'a [u8], Self, E>
-    where
-        E: NomError<'a>;
-
-    fn can_deserialize(input: &'a [u8]) -> CanDeserialize {
-        match Self::deserialize::<()>(input) {
-            Ok((rest, _)) => CanDeserialize::Yes {
-                consumed: input.len() - rest.len(),
-            },
-            Err(nom::Err::Incomplete(n)) => CanDeserialize::Incomplete(n),
-            Err(_) => CanDeserialize::No,
-        }
-    }
+    fn deserialize(input: &'a [u8]) -> IResult<'a, Self>;
 
     fn min_size() -> usize;
 
@@ -59,16 +39,10 @@ const VARIANT_ACK: u8 = 3;
 pub struct FileSize(pub u64);
 
 impl<'a> Wire<'a> for FileSize {
-    fn deserialize<E>(input: &'a [u8]) -> nom::IResult<&'a [u8], Self, E>
-    where
-        E: NomError<'a>,
-    {
+    fn deserialize(input: &'a [u8]) -> IResult<'a, Self> {
         context(
             "Filesize",
-            preceded(
-                verify(be_u8, |v| *v == VARIANT_FILESIZE),
-                map(be_u64, |size| Self(size)),
-            ),
+            preceded(verify(be_u8, |v| *v == VARIANT_FILESIZE), map(be_u64, Self)),
         )(input)
     }
 
@@ -99,10 +73,7 @@ pub struct Hash<'a, const N: usize> {
 }
 
 impl<'a, const N: usize> Wire<'a> for Hash<'a, N> {
-    fn deserialize<E>(input: &'a [u8]) -> nom::IResult<&'a [u8], Self, E>
-    where
-        E: NomError<'a>,
-    {
+    fn deserialize(input: &'a [u8]) -> IResult<'a, Self> {
         context(
             "Hash",
             preceded(
@@ -148,10 +119,7 @@ impl<'a, const N: usize> Hash<'a, N> {
 pub struct Data<'a>(pub &'a [u8]);
 
 impl<'a> Wire<'a> for Data<'a> {
-    fn deserialize<E>(input: &'a [u8]) -> nom::IResult<&'a [u8], Self, E>
-    where
-        E: NomError<'a>,
-    {
+    fn deserialize(input: &'a [u8]) -> IResult<'a, Self> {
         context(
             "Data",
             preceded(
@@ -185,10 +153,7 @@ pub enum Ack {
 }
 
 impl<'a> Wire<'a> for Ack {
-    fn deserialize<E>(input: &'a [u8]) -> nom::IResult<&'a [u8], Self, E>
-    where
-        E: NomError<'a>,
-    {
+    fn deserialize(input: &'a [u8]) -> IResult<'a, Self> {
         context(
             "Ack",
             preceded(
