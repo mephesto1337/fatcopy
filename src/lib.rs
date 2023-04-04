@@ -10,7 +10,8 @@ const BLOCK_SIZE: u64 = 4096;
 const HASH_SIZE: usize = 32;
 
 mod protocol;
-use protocol::Wire;
+use protocol::{Ack, Data, FileSize, Packet, Wire};
+type Hash<'a> = protocol::Hash<'a, HASH_SIZE>;
 
 #[derive(Debug)]
 pub struct FatCopy {
@@ -31,78 +32,60 @@ impl FatCopy {
         })
     }
 
-    fn send_wire<S, T>(&mut self, stream: &mut S, obj: &T) -> io::Result<()>
+    fn send_wire<'a, S, T>(stream: &mut S, packet: &mut Packet, obj: &'a T) -> io::Result<()>
     where
-        T: Wire,
+        T: Wire<'a>,
         S: Write,
     {
-        obj.serialize(stream)?;
+        packet.set(obj);
+        packet.serialize(stream)?;
         Ok(())
     }
 
-    fn recv_wire<S, T>(&mut self, stream: &mut S) -> io::Result<T>
+    fn recv_wire<'a, 's, S, T>(stream: &mut S, packet: &'a mut Packet) -> io::Result<T>
     where
+        's: 'a,
         S: Read,
-        T: Wire,
+        T: 'a + Wire<'a>,
     {
-        let mut buffer = vec![0u8; T::size_hint()];
-        stream.read_exact(&mut buffer[..])?;
-        loop {
-            match T::deserialize(&buffer[..]) {
-                Ok((rest, obj)) => {
-                    assert_eq!(rest.len(), 0);
-                    return Ok(obj);
-                }
-                Err(nom::Err::Incomplete(n)) => match n {
-                    nom::Needed::Unknown => todo!(),
-                    nom::Needed::Size(s) => {
-                        let offset = buffer.len();
-                        buffer.resize(offset + s.get(), 0);
-                        stream.read_exact(&mut buffer[offset..])?;
-                        continue;
-                    }
-                },
-                Err(nom::Err::Error(e)) | Err(nom::Err::Failure(e)) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("{e:#?}"),
-                    ));
-                }
-            }
-        }
+        packet.recv(stream)
     }
 
-    fn send_chunk<S>(&mut self, data: &[u8], stream: &mut S) -> io::Result<()>
+    fn send_chunk<S>(data: &[u8], stream: &mut S) -> io::Result<()>
     where
         S: Write + Read,
     {
         let mut hasher = Sha256::new();
         let mut hash: sha2::digest::generic_array::GenericArray<_, _> = [0u8; HASH_SIZE].into();
+        let mut packet = Packet::default();
+
         hasher.update(data);
         hasher.finalize_into(&mut hash);
-        self.send_wire(
+        Self::send_wire(
             stream,
-            &protocol::Hash::<HASH_SIZE> {
+            &mut packet,
+            &Hash {
                 size: data.len() as u32,
                 hash: hash.as_slice().into(),
             },
         )?;
-        let res: protocol::Ack = self.recv_wire(stream)?;
+        let res: Ack = Self::recv_wire(stream, &mut packet)?;
         match res {
-            protocol::Ack::Hash => {}
-            protocol::Ack::NeedData => {
-                self.send_wire(stream, &protocol::Data(data[..].into()))?;
+            Ack::Hash => {}
+            Ack::NeedData => {
+                Self::send_wire(stream, &mut packet, &Data(data[..].into()))?;
             }
         }
         Ok(())
     }
 
-    fn recv_data<S>(&mut self, stream: &mut S, hash: protocol::Hash<HASH_SIZE>) -> io::Result<u64>
+    fn recv_data<S>(&mut self, stream: &mut S, hash: Hash) -> io::Result<u64>
     where
         S: Read + Write,
     {
-        self.send_wire(stream, &protocol::Ack::NeedData)?;
-        let data: protocol::Data = self.recv_wire(stream)?;
+        let mut packet = Packet::default();
+        Self::send_wire(stream, &mut packet, &Ack::NeedData)?;
+        let data: Data = Self::recv_wire(stream, &mut packet)?;
         self.file.write_all(&data.0)?;
         #[cfg(debug_assertions)]
         {
@@ -117,14 +100,14 @@ impl FatCopy {
         Ok(data.0.len() as u64)
     }
 
-    fn recv_chunk<S>(&mut self, stream: &mut S) -> io::Result<u64>
+    fn recv_chunk<S>(&mut self, stream: &mut S, packet: &mut Packet) -> io::Result<u64>
     where
         S: Read + Write,
     {
         let mut hasher = Sha256::new();
         let mut hash: sha2::digest::generic_array::GenericArray<_, _> = [0u8; HASH_SIZE].into();
         let mut buffer = [0u8; BLOCK_SIZE as usize];
-        let remote: protocol::Hash<HASH_SIZE> = self.recv_wire(stream)?;
+        let remote = Self::recv_wire::<_, Hash>(stream, packet)?.to_owned();
 
         if self.has_reached_eof {
             return self.recv_data(stream, remote);
@@ -137,7 +120,7 @@ impl FatCopy {
                 hasher.update(&buffer[..size]);
                 hasher.finalize_into(&mut hash);
                 if hash.as_slice() == &*remote.hash {
-                    self.send_wire(stream, &protocol::Ack::Hash)?;
+                    Self::send_wire(stream, packet, &Ack::Hash)?;
                     Ok(size as u64)
                 } else {
                     self.file.seek(SeekFrom::Start(position))?;
@@ -162,17 +145,18 @@ impl FatCopy {
     {
         let size = self.file.metadata()?.len();
         let mut offset = 0;
+        let mut packet = Packet::default();
 
-        self.send_wire(stream, &protocol::FileSize(size))?;
+        Self::send_wire(stream, &mut packet, &FileSize(size))?;
         let mut data = [0u8; BLOCK_SIZE as usize];
         while offset + BLOCK_SIZE < size {
             self.file.read_exact(&mut data[..])?;
             offset += BLOCK_SIZE;
-            self.send_chunk(&data[..], stream)?;
+            Self::send_chunk(&data[..], stream)?;
         }
 
         let n = self.file.read(&mut data[..])?;
-        self.send_chunk(&data[..n], stream)?;
+        Self::send_chunk(&data[..n], stream)?;
 
         Ok(())
     }
@@ -181,13 +165,14 @@ impl FatCopy {
     where
         S: Read + Write,
     {
-        let filesize: protocol::FileSize = self.recv_wire(stream)?;
+        let mut packet = Packet::default();
+        let filesize = packet.recv::<FileSize, _>(stream)?.0;
         let mut offset = 0;
 
-        while offset < filesize.0 {
-            offset += self.recv_chunk(stream)?;
+        while offset < filesize {
+            offset += self.recv_chunk(stream, &mut packet)?;
         }
-        self.file.set_len(filesize.0)?;
+        self.file.set_len(filesize)?;
 
         Ok(())
     }
