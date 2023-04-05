@@ -7,7 +7,7 @@ It works along with SSH and a control master, by spawing a SSH process.
 
 ## Usage
 
-> ** Warning **
+> :warning: Warning
 > the binary must be in the path of the remote host
 
 ```bash
