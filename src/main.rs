@@ -120,7 +120,7 @@ fn main() -> anyhow::Result<()> {
             ((None, source), (Some(hostname), destination)) => {
                 let (mut master, master_path) = run_ssh_master(hostname)?;
                 let mut ctrl = SshControl::new(&master_path)?;
-                let mut dst = SshCommand::new(&format!("/tmp/fatcopy --stdio - {destination}"));
+                let mut dst = SshCommand::new(&format!("fatcopy --stdio - {destination}"));
                 dst.stdin(Pipe::new()?);
                 dst.stdout(Pipe::new()?);
                 let mut fatcopy = ctrl.new_session(dst)?;
@@ -138,7 +138,7 @@ fn main() -> anyhow::Result<()> {
             ((Some(hostname), source), (None, destination)) => {
                 let (mut master, master_path) = run_ssh_master(hostname)?;
                 let mut ctrl = SshControl::new(&master_path)?;
-                let mut dst = SshCommand::new(&format!("/tmp/fatcopy --stdio {source} -"));
+                let mut dst = SshCommand::new(&format!("fatcopy --stdio {source} -"));
                 dst.stdin(Pipe::new()?);
                 dst.stdout(Pipe::new()?);
                 let mut fatcopy = ctrl.new_session(dst)?;
