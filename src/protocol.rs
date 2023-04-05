@@ -1,12 +1,13 @@
 use std::{
     borrow::Cow,
+    fmt,
     io::{self, Read, Write},
     mem::size_of,
 };
 
 use nom::{
     bytes::streaming::take,
-    combinator::{map, map_opt, verify},
+    combinator::{map, map_opt, rest, verify},
     error::context,
     multi::length_data,
     number::streaming::{be_u32, be_u64, be_u8},
@@ -54,10 +55,23 @@ impl<'a> Wire<'a> for FileSize {
     }
 }
 
-#[derive(Debug)]
 pub struct Hash<'a, const N: usize> {
     pub size: u32,
     pub hash: Cow<'a, [u8]>,
+}
+
+impl<const N: usize> fmt::Debug for Hash<'_, N> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use std::fmt::Write;
+        let mut hash = String::with_capacity(N * 2);
+        for b in &self.hash[..N] {
+            write!(&mut hash, "{b:02x}")?;
+        }
+        f.debug_struct("Hash")
+            .field("size", &self.size)
+            .field("hash", &hash)
+            .finish()
+    }
 }
 
 impl<'a, const N: usize> Wire<'a> for Hash<'a, N> {
@@ -91,7 +105,7 @@ impl<'a, const N: usize> Wire<'a> for Hash<'a, N> {
 }
 
 impl<'a, const N: usize> Hash<'a, N> {
-    pub fn to_owned(self) -> Hash<'static, N> {
+    pub fn into_owned(self) -> Hash<'static, N> {
         Hash {
             size: self.size,
             hash: Cow::Owned(self.hash.into_owned()),
@@ -99,8 +113,13 @@ impl<'a, const N: usize> Hash<'a, N> {
     }
 }
 
-#[derive(Debug)]
 pub struct Data<'a>(pub Cow<'a, [u8]>);
+
+impl fmt::Debug for Data<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Data").field(&self.0.len()).finish()
+    }
+}
 
 impl<'a> Wire<'a> for Data<'_> {
     fn deserialize(input: &'a [u8]) -> IResult<'a, Self> {
@@ -108,9 +127,7 @@ impl<'a> Wire<'a> for Data<'_> {
             "Data",
             preceded(
                 verify(be_u8, |v| *v == VARIANT_DATA),
-                map(length_data(be_u32), |data: &[u8]| {
-                    Self(data.to_vec().into())
-                }),
+                map(rest, |data: &[u8]| Self(data.to_vec().into())),
             ),
         )(input)
     }
@@ -127,7 +144,7 @@ impl<'a> Wire<'a> for Data<'_> {
 
 #[derive(Debug)]
 pub enum Ack {
-    Hash,
+    HashOk,
     NeedData,
 }
 
@@ -138,7 +155,7 @@ impl<'a> Wire<'a> for Ack {
             preceded(
                 verify(be_u8, |v| *v == VARIANT_ACK),
                 map_opt(be_u8, |v| match v {
-                    0 => Some(Self::Hash),
+                    0 => Some(Self::HashOk),
                     1 => Some(Self::NeedData),
                     _ => None,
                 }),
@@ -151,7 +168,7 @@ impl<'a> Wire<'a> for Ack {
         W: Write,
     {
         let value = match self {
-            Ack::Hash => 0,
+            Ack::HashOk => 0,
             Ack::NeedData => 1,
         };
         let buffer = [VARIANT_ACK, value];
@@ -170,6 +187,7 @@ impl<'a> Wire<'a> for Packet {
         let (rest, _) = context("Packet", length_data(be_u32))(input)?;
 
         let size = input.offset(rest);
+        log::debug!("Packet of {size} bytes");
         Ok((
             rest,
             Self {
@@ -188,7 +206,7 @@ impl<'a> Wire<'a> for Packet {
 }
 
 impl Packet {
-    pub fn set<'a, T: Wire<'a>>(&mut self, value: &'a T) {
+    pub fn set<'a, T: Wire<'a> + std::fmt::Debug>(&mut self, value: &'a T) {
         self.buffer.clear();
         self.buffer.resize(SIZE, 0);
         let size = value
@@ -202,7 +220,7 @@ impl Packet {
 
     pub fn recv<'a, T: Wire<'a>, R: Read>(&'a mut self, reader: &mut R) -> io::Result<T> {
         self.buffer.clear();
-        self.buffer.reserve(SIZE);
+        self.buffer.resize(SIZE, 0);
 
         reader.read_exact(&mut self.buffer[..])?;
         let (_, size32) = be_u32::<&[u8], ()>(&self.buffer[..]).unwrap();
