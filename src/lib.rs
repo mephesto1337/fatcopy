@@ -51,41 +51,39 @@ impl FatCopy {
         packet.recv(stream)
     }
 
-    fn send_chunk<S>(data: &[u8], stream: &mut S) -> io::Result<()>
+    fn send_chunk<S>(data: &[u8], stream: &mut S, packet: &mut Packet) -> io::Result<()>
     where
         S: Write + Read,
     {
         let mut hasher = Sha256::new();
         let mut hash: sha2::digest::generic_array::GenericArray<_, _> = [0u8; HASH_SIZE].into();
-        let mut packet = Packet::default();
 
         hasher.update(data);
         hasher.finalize_into(&mut hash);
         Self::send_wire(
             stream,
-            &mut packet,
+            packet,
             &Hash {
                 size: data.len() as u32,
                 hash: hash.as_slice().into(),
             },
         )?;
-        let res: Ack = Self::recv_wire(stream, &mut packet)?;
+        let res: Ack = Self::recv_wire(stream, packet)?;
         match res {
             Ack::Hash => {}
             Ack::NeedData => {
-                Self::send_wire(stream, &mut packet, &Data(data[..].into()))?;
+                Self::send_wire(stream, packet, &Data(data[..].into()))?;
             }
         }
         Ok(())
     }
 
-    fn recv_data<S>(&mut self, stream: &mut S, hash: Hash) -> io::Result<u64>
+    fn recv_data<S>(&mut self, stream: &mut S, hash: Hash, packet: &mut Packet) -> io::Result<u64>
     where
         S: Read + Write,
     {
-        let mut packet = Packet::default();
-        Self::send_wire(stream, &mut packet, &Ack::NeedData)?;
-        let data: Data = Self::recv_wire(stream, &mut packet)?;
+        Self::send_wire(stream, packet, &Ack::NeedData)?;
+        let data: Data = Self::recv_wire(stream, packet)?;
         self.file.write_all(&data.0)?;
         #[cfg(debug_assertions)]
         {
@@ -110,7 +108,7 @@ impl FatCopy {
         let remote = Self::recv_wire::<_, Hash>(stream, packet)?.to_owned();
 
         if self.has_reached_eof {
-            return self.recv_data(stream, remote);
+            return self.recv_data(stream, remote, packet);
         }
         let size = remote.size as usize;
         let position = self.file.stream_position()?;
@@ -124,14 +122,14 @@ impl FatCopy {
                     Ok(size as u64)
                 } else {
                     self.file.seek(SeekFrom::Start(position))?;
-                    self.recv_data(stream, remote)
+                    self.recv_data(stream, remote, packet)
                 }
             }
             Err(e) => {
                 if e.kind() == io::ErrorKind::UnexpectedEof {
                     self.has_reached_eof = true;
                     self.file.seek(SeekFrom::Start(position))?;
-                    self.recv_data(stream, remote)
+                    self.recv_data(stream, remote, packet)
                 } else {
                     Err(e)
                 }
@@ -152,11 +150,11 @@ impl FatCopy {
         while offset + BLOCK_SIZE < size {
             self.file.read_exact(&mut data[..])?;
             offset += BLOCK_SIZE;
-            Self::send_chunk(&data[..], stream)?;
+            Self::send_chunk(&data[..], stream, &mut packet)?;
         }
 
         let n = self.file.read(&mut data[..])?;
-        Self::send_chunk(&data[..n], stream)?;
+        Self::send_chunk(&data[..n], stream, &mut packet)?;
 
         Ok(())
     }
