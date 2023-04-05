@@ -87,7 +87,6 @@ fn main() -> anyhow::Result<()> {
         }
         Ok(())
     } else {
-        let mut terminate_master = None;
         match (
             split_on_remote(&args.source),
             split_on_remote(&args.destination),
@@ -119,9 +118,8 @@ fn main() -> anyhow::Result<()> {
                 }
             }
             ((None, source), (Some(hostname), destination)) => {
-                let (_master, master_path) = run_ssh_master(hostname)?;
+                let (mut master, master_path) = run_ssh_master(hostname)?;
                 let mut ctrl = SshControl::new(&master_path)?;
-                terminate_master = Some(master_path);
                 let mut dst = SshCommand::new(&format!("/tmp/fatcopy --stdio - {destination}"));
                 dst.stdin(Pipe::new()?);
                 dst.stdout(Pipe::new()?);
@@ -135,11 +133,11 @@ fn main() -> anyhow::Result<()> {
 
                 src.send(&mut stdio)?;
                 ctrl.wait(&fatcopy)?;
+                master.kill()?;
             }
             ((Some(hostname), source), (None, destination)) => {
-                let (_master, master_path) = run_ssh_master(hostname)?;
+                let (mut master, master_path) = run_ssh_master(hostname)?;
                 let mut ctrl = SshControl::new(&master_path)?;
-                terminate_master = Some(master_path);
                 let mut dst = SshCommand::new(&format!("/tmp/fatcopy --stdio {source} -"));
                 dst.stdin(Pipe::new()?);
                 dst.stdout(Pipe::new()?);
@@ -153,12 +151,8 @@ fn main() -> anyhow::Result<()> {
 
                 dst.recv(&mut stdio)?;
                 ctrl.wait(&fatcopy)?;
+                master.kill()?;
             }
-        }
-
-        if let Some(master_path) = terminate_master {
-            let mut ctrl = SshControl::new(&master_path)?;
-            ctrl.terminate()?;
         }
 
         Ok(())
