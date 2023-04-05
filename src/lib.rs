@@ -1,4 +1,5 @@
 use std::{
+    fmt,
     fs::File,
     io::{self, Read, Seek, SeekFrom, Write},
     path::Path,
@@ -13,11 +14,26 @@ mod protocol;
 use protocol::{Ack, Data, FileSize, Packet, Wire};
 type Hash<'a> = protocol::Hash<'a, HASH_SIZE>;
 
-#[derive(Debug)]
+pub struct CallbackArg {
+    pub offset: u64,
+    pub size: u64,
+    pub hash_was_ok: bool,
+}
+
 pub struct FatCopy {
     file: File,
     has_reached_eof: bool,
     packet: Packet,
+    callback: Option<Box<dyn FnMut(CallbackArg)>>,
+}
+
+impl fmt::Debug for FatCopy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FatCopy")
+            .field("file", &self.file)
+            .field("has_reached_eof", &self.has_reached_eof)
+            .finish_non_exhaustive()
+    }
 }
 
 impl FatCopy {
@@ -31,7 +47,12 @@ impl FatCopy {
             file,
             has_reached_eof: false,
             packet: Packet::default(),
+            callback: None,
         })
+    }
+
+    pub fn register_callback(&mut self, callback: impl FnMut(CallbackArg) + 'static) {
+        self.callback = Some(Box::new(callback));
     }
 
     fn send_wire<'a, S, T>(&mut self, stream: &mut S, obj: &'a T) -> io::Result<()>
@@ -55,7 +76,7 @@ impl FatCopy {
         Ok(obj)
     }
 
-    fn send_chunk<S>(&mut self, data: &[u8], stream: &mut S) -> io::Result<()>
+    fn send_chunk<S>(&mut self, data: &[u8], stream: &mut S) -> io::Result<bool>
     where
         S: Write + Read,
     {
@@ -73,12 +94,12 @@ impl FatCopy {
         )?;
         let res: Ack = self.recv_wire(stream)?;
         match res {
-            Ack::HashOk => {}
+            Ack::HashOk => Ok(true),
             Ack::NeedData => {
                 self.send_wire(stream, &Data(data[..].into()))?;
+                Ok(false)
             }
         }
-        Ok(())
     }
 
     fn recv_data<S>(&mut self, stream: &mut S, hash: Hash) -> io::Result<u64>
@@ -97,11 +118,13 @@ impl FatCopy {
             hasher.finalize_into(&mut local_hash);
             assert_eq!(&*hash.hash, local_hash.as_slice());
         }
+        #[cfg(not(debug_assertions))]
+        let _ = hash;
 
         Ok(data.0.len() as u64)
     }
 
-    fn recv_chunk<S>(&mut self, stream: &mut S) -> io::Result<u64>
+    fn recv_chunk<S>(&mut self, stream: &mut S) -> io::Result<(u64, bool)>
     where
         S: Read + Write,
     {
@@ -111,7 +134,7 @@ impl FatCopy {
         let remote = self.recv_wire::<_, Hash>(stream)?.into_owned();
 
         if self.has_reached_eof {
-            return self.recv_data(stream, remote);
+            return Ok((self.recv_data(stream, remote)?, false));
         }
         let size = remote.size as usize;
         let position = self.file.stream_position()?;
@@ -123,11 +146,11 @@ impl FatCopy {
                 if hash.as_slice() == &*remote.hash {
                     self.send_wire(stream, &Ack::HashOk)?;
                     log::debug!("read_exact OK, hashes OK");
-                    Ok(size as u64)
+                    Ok(((size as u64), true))
                 } else {
                     self.file.seek(SeekFrom::Start(position))?;
                     log::debug!("read_exact OK, hashes KO, asking for data");
-                    self.recv_data(stream, remote)
+                    Ok((self.recv_data(stream, remote)?, false))
                 }
             }
             Err(e) => {
@@ -135,7 +158,7 @@ impl FatCopy {
                     log::debug!("EOF is reached");
                     self.has_reached_eof = true;
                     self.file.seek(SeekFrom::Start(position))?;
-                    self.recv_data(stream, remote)
+                    Ok((self.recv_data(stream, remote)?, false))
                 } else {
                     Err(e)
                 }
@@ -153,15 +176,27 @@ impl FatCopy {
         self.send_wire(stream, &FileSize(size))?;
         let mut data = [0u8; BLOCK_SIZE as usize];
         while offset + BLOCK_SIZE < size {
-            log::debug!("read_exact, offset={offset}, size={size}");
             self.file.read_exact(&mut data[..])?;
+            let hash_was_ok = self.send_chunk(&data[..], stream)?;
+            if let Some(ref mut cb) = self.callback {
+                cb(CallbackArg {
+                    offset,
+                    size,
+                    hash_was_ok,
+                });
+            }
             offset += BLOCK_SIZE;
-            self.send_chunk(&data[..], stream)?;
         }
 
-        log::debug!("read, offset={offset}, size={size}");
         let n = self.file.read(&mut data[..])?;
-        self.send_chunk(&data[..n], stream)?;
+        let hash_was_ok = self.send_chunk(&data[..n], stream)?;
+        if let Some(ref mut cb) = self.callback {
+            cb(CallbackArg {
+                offset,
+                size,
+                hash_was_ok,
+            });
+        }
 
         Ok(())
     }
@@ -170,13 +205,21 @@ impl FatCopy {
     where
         S: Read + Write,
     {
-        let filesize = self.recv_wire::<_, FileSize>(stream)?.0;
+        let size = self.recv_wire::<_, FileSize>(stream)?.0;
         let mut offset = 0;
 
-        while offset < filesize {
-            offset += self.recv_chunk(stream)?;
+        while offset < size {
+            let (count, hash_was_ok) = self.recv_chunk(stream)?;
+            if let Some(cb) = self.callback.as_mut() {
+                cb(CallbackArg {
+                    offset,
+                    size,
+                    hash_was_ok,
+                });
+            }
+            offset += count;
         }
-        self.file.set_len(filesize)?;
+        self.file.set_len(size)?;
 
         Ok(())
     }

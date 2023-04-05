@@ -481,7 +481,7 @@ dependencies = [
 [[package]]
 name = "ssh-control"
 version = "0.1.0"
-source = "git+https://github.com/mephesto1337/ssh-control#8d699290a250b170eeb8e81c75f579acc6c01c47"
+source = "git+https://github.com/mephesto1337/ssh-control#8fbde53df6e2c436347bf5103ff19ddaf08ae6ad"
 dependencies = [
  "env_logger",
  "libc",
