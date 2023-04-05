@@ -5,6 +5,15 @@ Typical use case is when you have to move a VM's disk back and forth 2 hosts.
 
 It works along with SSH and a control master, by spawing a SSH process. 
 
+## Usage
+
+> ** Warning **
+> the binary must be in the path of the remote host
+
+```bash
+fatcopy /var/lib/libvirt/images/vm.qcow2 other-host:/var/lib/libvirt/images/vm.qcow2
+```
+
 ## Why can I just ue rsync ?
 
 You could use rync with the following command:
