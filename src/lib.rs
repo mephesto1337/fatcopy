@@ -284,7 +284,9 @@ impl FatCopy {
 
         data.clear();
         self.file.read_to_end(&mut data)?;
-        self.send_chunks(&data[..], offset, stream)?;
+        if !data.is_empty() {
+            self.send_chunks(&data[..], offset, stream)?;
+        }
 
         Ok(())
     }
