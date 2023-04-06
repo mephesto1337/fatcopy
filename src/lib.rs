@@ -7,24 +7,34 @@ use std::{
 
 use sha2::{Digest, Sha256};
 
-const BLOCK_SIZE: u64 = 4096;
 const HASH_SIZE: usize = 32;
 
+pub const DEFAULT_BLOCK_SIZE: u64 = 4096;
+pub const DEFAULT_BULK_SIZE: u64 = 32;
+
 mod protocol;
-use protocol::{Ack, Data, FileSize, Packet, Wire};
-type Hash<'a> = protocol::Hash<'a, HASH_SIZE>;
+use protocol::{Ack, AckResult, Data, FileSize, Packet, Wire};
+
+type Hash = protocol::Hash<HASH_SIZE>;
 
 pub struct CallbackArg {
     pub offset: u64,
     pub size: u64,
-    pub hash_was_ok: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct Options {
+    pub block_size: u64,
+    pub bulk_size: u64,
 }
 
 pub struct FatCopy {
     file: File,
     has_reached_eof: bool,
     packet: Packet,
-    callback: Option<Box<dyn FnMut(CallbackArg)>>,
+    callback: Box<dyn FnMut(CallbackArg)>,
+    filesize: u64,
+    options: Options,
 }
 
 impl fmt::Debug for FatCopy {
@@ -32,137 +42,219 @@ impl fmt::Debug for FatCopy {
         f.debug_struct("FatCopy")
             .field("file", &self.file)
             .field("has_reached_eof", &self.has_reached_eof)
+            .field("options", &self.options)
             .finish_non_exhaustive()
     }
 }
 
 impl FatCopy {
-    pub fn new(path: impl AsRef<Path>) -> io::Result<Self> {
+    pub fn new_with_options(path: impl AsRef<Path>, options: Options) -> io::Result<Self> {
         let file = File::options()
             .read(true)
             .write(true)
             .create(true)
             .open(path)?;
+        let filesize = file.metadata()?.len();
         Ok(Self {
             file,
             has_reached_eof: false,
             packet: Packet::default(),
-            callback: None,
+            callback: Box::new(|_| {}),
+            options,
+            filesize,
         })
     }
 
+    pub fn new(path: impl AsRef<Path>) -> io::Result<Self> {
+        Self::new_with_options(
+            path,
+            Options {
+                block_size: DEFAULT_BLOCK_SIZE,
+                bulk_size: DEFAULT_BULK_SIZE,
+            },
+        )
+    }
+
     pub fn register_callback(&mut self, callback: impl FnMut(CallbackArg) + 'static) {
-        self.callback = Some(Box::new(callback));
+        self.callback = Box::new(callback);
     }
 
-    fn send_wire<'a, S, T>(&mut self, stream: &mut S, obj: &'a T) -> io::Result<()>
-    where
-        T: Wire<'a> + std::fmt::Debug,
-        S: Write,
-    {
-        self.packet.set(obj);
-        log::debug!("Sending {obj:?}");
-        self.packet.serialize(stream)?;
-        Ok(())
+    fn get_data(buffer: &[u8], offset: usize, size: usize) -> Option<&[u8]> {
+        if offset > buffer.len() {
+            None
+        } else {
+            Some(if offset + size > buffer.len() {
+                &buffer[offset..]
+            } else {
+                &buffer[offset..][..size]
+            })
+        }
     }
 
-    fn recv_wire<'a, S, T>(&'a mut self, stream: &mut S) -> io::Result<T>
-    where
-        S: Read,
-        T: 'a + Wire<'a> + std::fmt::Debug,
-    {
-        let obj = self.packet.recv(stream)?;
-        log::debug!("Received {obj:?}");
-        Ok(obj)
-    }
-
-    fn send_chunk<S>(&mut self, data: &[u8], stream: &mut S) -> io::Result<bool>
+    fn send_chunks<S>(&mut self, data: &[u8], offset: u64, stream: &mut S) -> io::Result<()>
     where
         S: Write + Read,
     {
+        self.packet.clear();
         let mut hasher = Sha256::new();
-        let mut hash: sha2::digest::generic_array::GenericArray<_, _> = [0u8; HASH_SIZE].into();
+        let mut hash_data: sha2::digest::generic_array::GenericArray<_, _> =
+            [0u8; HASH_SIZE].into();
 
-        hasher.update(data);
-        hasher.finalize_into(&mut hash);
-        self.send_wire(
-            stream,
-            &Hash {
-                size: data.len() as u32,
-                hash: hash.as_slice().into(),
-            },
-        )?;
-        let res: Ack = self.recv_wire(stream)?;
-        match res {
-            Ack::HashOk => Ok(true),
-            Ack::NeedData => {
-                self.send_wire(stream, &Data(data[..].into()))?;
-                Ok(false)
+        let mut hash = Hash {
+            size: self.options.block_size as u32,
+            offset,
+            hash: [0u8; HASH_SIZE],
+        };
+
+        let mut o = 0;
+        let mut hashes_sent = 0usize;
+        for _ in 0..self.options.bulk_size {
+            if let Some(d) = Self::get_data(data, o as usize, self.options.block_size as usize) {
+                hasher.update(d);
+                hasher.finalize_into_reset(&mut hash_data);
+                hash.hash.copy_from_slice(hash_data.as_slice());
+                self.packet.add(&hash);
+
+                hashes_sent += 1;
+                hash.offset += self.options.block_size;
+                o += self.options.block_size;
+            } else {
+                break;
             }
         }
-    }
 
-    fn recv_data<S>(&mut self, stream: &mut S, hash: Hash) -> io::Result<u64>
-    where
-        S: Read + Write,
-    {
-        self.send_wire(stream, &Ack::NeedData)?;
-        let data: Data = self.recv_wire(stream)?;
-        self.file.write_all(&data.0)?;
-        #[cfg(debug_assertions)]
-        {
-            let mut hasher = Sha256::new();
-            let mut local_hash: sha2::digest::generic_array::GenericArray<_, _> =
-                [0u8; HASH_SIZE].into();
-            hasher.update(&data.0);
-            hasher.finalize_into(&mut local_hash);
-            assert_eq!(&*hash.hash, local_hash.as_slice());
-        }
-        #[cfg(not(debug_assertions))]
-        let _ = hash;
+        self.packet.serialize(stream)?;
 
-        Ok(data.0.len() as u64)
-    }
+        // Now get replies
+        let count = self.packet.recv_next_bulk(stream)?;
 
-    fn recv_chunk<S>(&mut self, stream: &mut S) -> io::Result<(u64, bool)>
-    where
-        S: Read + Write,
-    {
-        let mut hasher = Sha256::new();
-        let mut hash: sha2::digest::generic_array::GenericArray<_, _> = [0u8; HASH_SIZE].into();
-        let mut buffer = [0u8; BLOCK_SIZE as usize];
-        let remote = self.recv_wire::<_, Hash>(stream)?.into_owned();
+        assert_eq!(count, hashes_sent);
 
-        if self.has_reached_eof {
-            return Ok((self.recv_data(stream, remote)?, false));
-        }
-        let size = remote.size as usize;
-        let position = self.file.stream_position()?;
-
-        match self.file.read_exact(&mut buffer[..size]) {
-            Ok(()) => {
-                hasher.update(&buffer[..size]);
-                hasher.finalize_into(&mut hash);
-                if hash.as_slice() == &*remote.hash {
-                    self.send_wire(stream, &Ack::HashOk)?;
-                    log::debug!("read_exact OK, hashes OK");
-                    Ok(((size as u64), true))
-                } else {
-                    self.file.seek(SeekFrom::Start(position))?;
-                    log::debug!("read_exact OK, hashes KO, asking for data");
-                    Ok((self.recv_data(stream, remote)?, false))
+        while let Some(ack) = self.packet.get_next::<Ack>()? {
+            match ack.status {
+                AckResult::HashOk => {}
+                AckResult::NeedData => {
+                    self.send_data(ack.offset, ack.size, stream)?;
                 }
+            }
+        }
+        (self.callback)(CallbackArg {
+            offset: offset + data.len() as u64,
+            size: self.filesize,
+        });
+
+        Ok(())
+    }
+
+    fn send_data<S>(&mut self, offset: u64, size: u32, stream: &mut S) -> io::Result<()>
+    where
+        S: Write,
+    {
+        self.file.seek(SeekFrom::Start(offset))?;
+        self.packet
+            .set_data(offset, size as usize, &mut self.file)?;
+        self.packet.serialize(stream)?;
+
+        Ok(())
+    }
+
+    fn recv_chunks<S>(&mut self, stream: &mut S) -> io::Result<u64>
+    where
+        S: Read + Write,
+    {
+        self.packet.recv_next_bulk(stream)?;
+
+        let mut read_size = 0;
+        let mut hashes = Vec::with_capacity(self.options.bulk_size as usize);
+
+        while let Some(hash) = self.packet.get_next::<Hash>()? {
+            read_size += hash.size as usize;
+            hashes.push(hash);
+        }
+
+        let start_offset = hashes[0].offset;
+        let mut buffer = vec![0u8; read_size];
+
+        if self.file.stream_position()? != start_offset {
+            self.file.seek(SeekFrom::Start(start_offset))?;
+        }
+        match self.file.read_exact(&mut buffer[..]) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                buffer.clear();
+                self.file.read_to_end(&mut buffer)?;
             }
             Err(e) => {
-                if e.kind() == io::ErrorKind::UnexpectedEof {
-                    log::debug!("EOF is reached");
-                    self.has_reached_eof = true;
-                    self.file.seek(SeekFrom::Start(position))?;
-                    Ok((self.recv_data(stream, remote)?, false))
-                } else {
-                    Err(e)
-                }
+                return Err(e);
             }
+        }
+
+        self.packet.clear();
+        let mut data_needed = 0usize;
+        for hash in &hashes {
+            let status = if Self::check_hash(&buffer[..], start_offset, hash) {
+                AckResult::HashOk
+            } else {
+                data_needed += 1;
+                AckResult::NeedData
+            };
+            let ack = Ack {
+                status,
+                size: hash.size,
+                offset: hash.offset,
+            };
+            self.packet.add(&ack);
+        }
+
+        self.packet.serialize(stream)?;
+
+        for _ in 0..data_needed {
+            self.packet.recv_next_bulk(stream)?;
+            let data = match self.packet.get_next::<Data>()? {
+                Some(d) => d,
+                None => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Empty bulk receive?!",
+                    ));
+                }
+            };
+            self.file.seek(SeekFrom::Start(data.offset))?;
+            self.file.write_all(&data.buffer)?;
+        }
+
+        let size = hashes.iter().map(|h| h.size as u64).sum::<u64>();
+
+        (self.callback)(CallbackArg {
+            offset: start_offset + size,
+            size: self.filesize,
+        });
+
+        Ok(size)
+    }
+
+    fn check_hash(buffer: &[u8], offset: u64, hash: &Hash) -> bool {
+        if let Some(data) =
+            Self::get_data(buffer, (hash.offset - offset) as usize, hash.size as usize)
+        {
+            let mut hasher = Sha256::new();
+            let mut hash_data: sha2::digest::generic_array::GenericArray<_, _> =
+                [0u8; HASH_SIZE].into();
+
+            assert_eq!(hash.size as usize, data.len());
+            hasher.update(data);
+            hasher.finalize_into(&mut hash_data);
+            if hash_data.as_slice() == hash.hash {
+                true
+            } else {
+                log::debug!("offset: {offset}");
+                log::debug!("hash = {hash:?}");
+                log::debug!("Computed: {:02x?}", hash_data.as_slice());
+                log::debug!("Received: {:02x?}", &hash.hash[..]);
+                panic!();
+            }
+        } else {
+            false
         }
     }
 
@@ -173,30 +265,26 @@ impl FatCopy {
         let size = self.file.metadata()?.len();
         let mut offset = 0;
 
-        self.send_wire(stream, &FileSize(size))?;
-        let mut data = [0u8; BLOCK_SIZE as usize];
-        while offset + BLOCK_SIZE < size {
+        self.packet.clear();
+        self.packet.add(&FileSize(size));
+        self.packet.serialize(stream)?;
+        let read_size = self
+            .options
+            .block_size
+            .checked_mul(self.options.bulk_size)
+            .expect("u64 Overflow, please deceasing eitehr `bulk_size` or `block_size`");
+
+        let mut data = vec![0u8; read_size as usize];
+
+        while offset + read_size < size {
             self.file.read_exact(&mut data[..])?;
-            let hash_was_ok = self.send_chunk(&data[..], stream)?;
-            if let Some(ref mut cb) = self.callback {
-                cb(CallbackArg {
-                    offset,
-                    size,
-                    hash_was_ok,
-                });
-            }
-            offset += BLOCK_SIZE;
+            self.send_chunks(&data[..], offset, stream)?;
+            offset += read_size;
         }
 
-        let n = self.file.read(&mut data[..])?;
-        let hash_was_ok = self.send_chunk(&data[..n], stream)?;
-        if let Some(ref mut cb) = self.callback {
-            cb(CallbackArg {
-                offset,
-                size,
-                hash_was_ok,
-            });
-        }
+        data.clear();
+        self.file.read_to_end(&mut data)?;
+        self.send_chunks(&data[..], offset, stream)?;
 
         Ok(())
     }
@@ -205,21 +293,24 @@ impl FatCopy {
     where
         S: Read + Write,
     {
-        let size = self.recv_wire::<_, FileSize>(stream)?.0;
+        self.packet.recv_next_bulk(stream)?;
+        let filesize = match self.packet.get_next::<FileSize>()? {
+            Some(fs) => fs.0,
+            None => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "First bulk of data is empty",
+                ));
+            }
+        };
+        self.filesize = filesize;
         let mut offset = 0;
 
-        while offset < size {
-            let (count, hash_was_ok) = self.recv_chunk(stream)?;
-            if let Some(cb) = self.callback.as_mut() {
-                cb(CallbackArg {
-                    offset,
-                    size,
-                    hash_was_ok,
-                });
-            }
+        while offset < filesize {
+            let count = self.recv_chunks(stream)?;
             offset += count;
         }
-        self.file.set_len(size)?;
+        self.file.set_len(filesize)?;
 
         Ok(())
     }

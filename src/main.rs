@@ -24,6 +24,14 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     stdio: bool,
 
+    /// Block size to use
+    #[arg(long, default_value_t = fatcopy::DEFAULT_BLOCK_SIZE, env)]
+    block_size: u64,
+
+    /// Block size to use
+    #[arg(long, default_value_t = fatcopy::DEFAULT_BULK_SIZE, env)]
+    bulk_size: u64,
+
     /// Remote location for fatcopy
     #[arg(long, default_value = "fatcopy")]
     remote_binary: String,
@@ -85,14 +93,19 @@ fn main() -> anyhow::Result<()> {
     builder.init();
     let args = Cli::parse();
 
+    let options = fatcopy::Options {
+        block_size: args.block_size,
+        bulk_size: args.bulk_size,
+    };
+
     if args.stdio {
         // We are launch through SSH
         if args.source == "-" {
-            let mut fatcopy = FatCopy::new(&args.destination)?;
+            let mut fatcopy = FatCopy::new_with_options(&args.destination, options.clone())?;
             let mut stdio = Pipe::stdio();
             fatcopy.recv(&mut stdio)?;
         } else if args.destination == "-" {
-            let mut fatcopy = FatCopy::new(&args.source)?;
+            let mut fatcopy = FatCopy::new_with_options(&args.source, options.clone())?;
             let mut stdio = Pipe::stdio();
             fatcopy.send(&mut stdio)?;
         } else {
@@ -125,14 +138,14 @@ fn main() -> anyhow::Result<()> {
 
                 match unsafe { fork() }? {
                     ForkResult::Parent { child } => {
-                        let mut src = FatCopy::new(source)?;
+                        let mut src = FatCopy::new_with_options(source, options)?;
                         src.register_callback(callback);
                         let mut sock = unsafe { UnixStream::from_raw_fd(a) };
                         src.send(&mut sock)?;
                         waitpid(Some(child), None)?;
                     }
                     ForkResult::Child => {
-                        let mut dst = FatCopy::new(destination)?;
+                        let mut dst = FatCopy::new_with_options(destination, options)?;
                         let mut sock = unsafe { UnixStream::from_raw_fd(b) };
                         dst.recv(&mut sock)?;
                         exit(0);
@@ -141,7 +154,7 @@ fn main() -> anyhow::Result<()> {
             }
             ((None, source), (Some(hostname), destination)) => {
                 let (mut master, master_path) = run_ssh_master(hostname)?;
-                let mut ctrl = SshControl::new(&master_path)?;
+                let mut ctrl = SshControl::new(master_path)?;
                 let dst = prepare_remote_fatcopy(format!(
                     "{bin} --stdio - {destination}",
                     bin = &args.remote_binary
@@ -152,7 +165,7 @@ fn main() -> anyhow::Result<()> {
                     fatcopy.stdout.take().unwrap(),
                 );
                 let mut stdio = Pipe::with_pipes(stdout, stdin);
-                let mut src = FatCopy::new(source)?;
+                let mut src = FatCopy::new_with_options(source, options)?;
                 src.register_callback(callback);
 
                 src.send(&mut stdio)?;
@@ -161,7 +174,7 @@ fn main() -> anyhow::Result<()> {
             }
             ((Some(hostname), source), (None, destination)) => {
                 let (mut master, master_path) = run_ssh_master(hostname)?;
-                let mut ctrl = SshControl::new(&master_path)?;
+                let mut ctrl = SshControl::new(master_path)?;
                 let src = prepare_remote_fatcopy(format!(
                     "{bin} --stdio {source} - ",
                     bin = &args.remote_binary
@@ -172,7 +185,7 @@ fn main() -> anyhow::Result<()> {
                     fatcopy.stdout.take().unwrap(),
                 );
                 let mut stdio = Pipe::with_pipes(stdout, stdin);
-                let mut dst = FatCopy::new(destination)?;
+                let mut dst = FatCopy::new_with_options(destination, options)?;
                 dst.register_callback(callback);
 
                 dst.recv(&mut stdio)?;
@@ -180,7 +193,7 @@ fn main() -> anyhow::Result<()> {
                 master.kill()?;
             }
         }
-        println!("");
+        println!();
 
         Ok(())
     }
