@@ -327,7 +327,7 @@ impl FatCopy {
             } else {
                 log::debug!("Computed: {:02x?}", hash_data.as_slice());
                 log::debug!("Received: {:02x?}", &hash.hash[..]);
-                panic!();
+                false
             }
         } else {
             // If offset was beyond buffer, then hash cannot match
