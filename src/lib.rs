@@ -1,6 +1,6 @@
 use std::{
     fmt,
-    fs::File,
+    fs::{File, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
     path::Path,
 };
@@ -78,13 +78,24 @@ impl fmt::Debug for FatCopy {
 }
 
 impl FatCopy {
-    /// Creates a file to be copied from/to with options.
-    pub fn new_with_options(path: impl AsRef<Path>, options: Options) -> io::Result<Self> {
-        let file = File::options()
+    pub fn open_as_source(path: impl AsRef<Path>) -> io::Result<File> {
+        OpenOptions::new()
+            .read(true)
+            .write(false)
+            .create(false)
+            .open(path)
+    }
+
+    pub fn open_as_destination(path: impl AsRef<Path>) -> io::Result<File> {
+        OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
-            .open(path)?;
+            .open(path)
+    }
+
+    /// Creates a file to be copied from/to with options.
+    pub fn new_with_options(file: File, options: Options) -> io::Result<Self> {
         let filesize = file.metadata()?.len();
         Ok(Self {
             file,
@@ -98,9 +109,9 @@ impl FatCopy {
     }
 
     /// Same as [`FatCopy::new_with_options`] but uses default values.
-    pub fn new(path: impl AsRef<Path>) -> io::Result<Self> {
+    pub fn new(file: File) -> io::Result<Self> {
         Self::new_with_options(
-            path,
+            file,
             Options {
                 block_size: DEFAULT_BLOCK_SIZE,
                 bulk_size: DEFAULT_BULK_SIZE,

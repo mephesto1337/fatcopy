@@ -173,11 +173,15 @@ fn main_helper() -> io::Result<()> {
     if args.stdio {
         // We are launch through SSH
         if args.source == "-" {
-            let mut fatcopy = FatCopy::new_with_options(&args.destination, options)?;
+            let mut fatcopy = FatCopy::new_with_options(
+                FatCopy::open_as_destination(&args.destination)?,
+                options,
+            )?;
             let mut stdio = Pipe::stdio();
             fatcopy.recv(&mut stdio)?;
         } else if args.destination == "-" {
-            let mut fatcopy = FatCopy::new_with_options(&args.source, options)?;
+            let mut fatcopy =
+                FatCopy::new_with_options(FatCopy::open_as_source(&args.source)?, options)?;
             let mut stdio = Pipe::stdio();
             fatcopy.send(&mut stdio)?;
         } else {
@@ -214,14 +218,18 @@ fn main_helper() -> io::Result<()> {
 
                 match unsafe { fork() }? {
                     ForkResult::Parent { child } => {
-                        let mut src = FatCopy::new_with_options(source, options)?;
+                        let mut src =
+                            FatCopy::new_with_options(FatCopy::open_as_source(source)?, options)?;
                         src.register_callback(callback);
                         let mut sock = unsafe { UnixStream::from_raw_fd(a) };
                         src.send(&mut sock)?;
                         waitpid(Some(child), None)?;
                     }
                     ForkResult::Child => {
-                        let mut dst = FatCopy::new_with_options(destination, options)?;
+                        let mut dst = FatCopy::new_with_options(
+                            FatCopy::open_as_destination(destination)?,
+                            options,
+                        )?;
                         let mut sock = unsafe { UnixStream::from_raw_fd(b) };
                         dst.recv(&mut sock)?;
                         exit(0);
@@ -229,22 +237,23 @@ fn main_helper() -> io::Result<()> {
                 }
             }
             ((None, source), (Some(hostname), destination)) => {
-                let remote_command = prepare_remote_fatcopy(source, destination, &args);
+                let remote_command = prepare_remote_fatcopy("-", destination, &args);
                 let mut ssh =
                     run_through_ssh(args.ssh_command.as_deref(), hostname, &remote_command)?;
                 let mut stdio = Pipe::from_child(&mut ssh).unwrap();
-                let mut src = FatCopy::new_with_options(source, options)?;
+                let mut src = FatCopy::new_with_options(FatCopy::open_as_source(source)?, options)?;
                 src.register_callback(callback);
 
                 src.send(&mut stdio)?;
                 ssh.wait()?;
             }
             ((Some(hostname), source), (None, destination)) => {
-                let remote_command = prepare_remote_fatcopy(source, destination, &args);
+                let remote_command = prepare_remote_fatcopy(source, "-", &args);
                 let mut ssh =
                     run_through_ssh(args.ssh_command.as_deref(), hostname, &remote_command)?;
                 let mut stdio = Pipe::from_child(&mut ssh).unwrap();
-                let mut dst = FatCopy::new_with_options(source, options)?;
+                let mut dst =
+                    FatCopy::new_with_options(FatCopy::open_as_destination(destination)?, options)?;
                 dst.register_callback(callback);
 
                 dst.recv(&mut stdio)?;
