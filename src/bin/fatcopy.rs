@@ -101,7 +101,15 @@ fn prepare_remote_fatcopy(source: &str, destination: &str, args: &Cli) -> String
     command
 }
 
-fn main() -> io::Result<()> {
+fn main() {
+    if let Err(e) = main_helper() {
+        log::error!("{e:#?}");
+        exit(1);
+    }
+    exit(0);
+}
+
+fn main_helper() -> io::Result<()> {
     let args = Cli::parse();
     let mut builder = env_logger::builder();
 
