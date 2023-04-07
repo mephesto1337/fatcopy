@@ -44,3 +44,40 @@ The protocol is pretty simple.
 
 3. The server has the smaller size, then we are done. Otherwise the server will on send data's
    blocks. As the client has a smaller size, hashes will not match.
+
+## Some numbers
+To send a 1GB file between 2 PCs (disks speed does not count as they were stored in tmpfs) with a
+1Gbit/s link and the default settings over an SSH connection.
+
+For reference here is some speeds:
+
+`cat file | ssh host 'cat > file'`:  9.244s / 886.20 Mbit/s
+`cat file > /dev/tcp/1.2.3.4/1337`:  9.110s / 899.24 Mbit/s
+`rsync --inplace file host:file`  : 10.872s / 753.50 Mbit/s (files were 99.99% similar)
+
+| Description of remote file  | Time (in seconds) | Speed (Mbit/s) |
+|-----------------------------|-------------------|----------------|
+| Completly random, same size | 10.438            |  784.83        |
+| Completly random, half size | 9.848             |  831.85        |
+| Empty                       | 9.218             |  888.70        |
+| Same at 99%                 | 10.471            |  782.36        |
+| Same at 99.9%               | 9.899             |  827.56        |
+| Same at 99.99%              | 5.722             | 1431.68        |
+| Same at 100%                | 5.612             | 1459.74        |
+| Same at 99.9%, 85% size     | 6.216             | 1317.90        |
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
