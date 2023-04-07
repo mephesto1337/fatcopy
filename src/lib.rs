@@ -192,9 +192,13 @@ impl FatCopy {
                     let d = Data {
                         offset: ack.offset,
                         // Sure, `ack` is a user control data, but if its bad it will just crash.
-                        buffer: Self::get_data(data, ack.offset as usize, ack.size as usize)
-                            .unwrap()
-                            .into(),
+                        buffer: Self::get_data(
+                            data,
+                            (ack.offset - offset) as usize,
+                            ack.size as usize,
+                        )
+                        .unwrap()
+                        .into(),
                     };
                     self.packet.clear();
                     self.packet.add(&d);
