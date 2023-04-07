@@ -419,6 +419,10 @@ impl FatCopy {
                 .set_data(offset, read_size as usize, &mut self.file)?;
             self.packet.serialize(stream)?;
             offset += read_size;
+            (self.callback)(CallbackArg {
+                offset,
+                size: self.new_filesize,
+            });
         }
 
         // 5. Sends the rest
@@ -430,6 +434,10 @@ impl FatCopy {
             let n = self.new_filesize - offset;
             self.packet.set_data(offset, n as usize, &mut self.file)?;
             self.packet.serialize(stream)?;
+            (self.callback)(CallbackArg {
+                offset: offset + n,
+                size: self.new_filesize,
+            });
         }
 
         Ok(())
