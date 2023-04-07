@@ -90,7 +90,7 @@ fn prepare_remote_fatcopy(source: &str, destination: &str, args: &Cli) -> String
     let mut command = String::new();
     write!(
         &mut command,
-        "{} --stdio --is-remote-ssh",
+        "{} --stdio --is-remote-ssh ",
         args.remote_binary
     )
     .unwrap();
