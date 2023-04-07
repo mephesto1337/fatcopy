@@ -387,7 +387,7 @@ impl FatCopy {
         let mut data = vec![0u8; read_size as usize];
 
         // 1. set hashes and maybe data if hash do not match
-        while offset + read_size < self.new_filesize.min(self.old_filesize) {
+        while offset + read_size <= self.new_filesize.min(self.old_filesize) {
             self.file.read_exact(&mut data[..])?;
             self.send_chunks(&data[..], offset, stream)?;
             offset += read_size;
