@@ -171,9 +171,6 @@ impl FatCopy {
         // Sanity check
         assert_eq!(count, hashes_sent);
 
-        // Does the remote needs updates?
-        let mut remote_was_dirty = false;
-
         // Process the replies
         for ack in acks {
             match ack.status {
@@ -181,16 +178,18 @@ impl FatCopy {
                 AckResult::HashOk => {}
                 // Hash does not match on the other side, sends the data
                 AckResult::NeedData => {
-                    remote_was_dirty = true;
-                    self.send_data(ack.offset, ack.size, stream)?;
+                    let d = Data {
+                        offset: ack.offset,
+                        // Sure, `ack` is a user control data, but if its bad it will just crash.
+                        buffer: Self::get_data(data, ack.offset as usize, ack.size as usize)
+                            .unwrap()
+                            .into(),
+                    };
+                    self.packet.clear();
+                    self.packet.add(&d);
+                    self.packet.serialize(stream)?;
                 }
             }
-        }
-
-        // If remote was dirty, then seek back were we were.
-        if remote_was_dirty {
-            self.file
-                .seek(SeekFrom::Start(offset + data.len() as u64))?;
         }
 
         // Calls callback
@@ -198,23 +197,6 @@ impl FatCopy {
             offset: offset + data.len() as u64,
             size: self.new_filesize,
         });
-
-        Ok(())
-    }
-
-    fn send_data<S>(&mut self, offset: u64, size: u32, stream: &mut S) -> io::Result<()>
-    where
-        S: Write,
-    {
-        // Seeks to position of needed data
-        self.file.seek(SeekFrom::Start(offset))?;
-
-        // Reads the data through [`Packet::set_data`] method to avoid copying data afterwards
-        self.packet
-            .set_data(offset, size as usize, &mut self.file)?;
-
-        // Sends the data
-        self.packet.serialize(stream)?;
 
         Ok(())
     }
