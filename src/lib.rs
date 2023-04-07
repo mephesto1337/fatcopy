@@ -259,10 +259,6 @@ impl FatCopy {
                 // We are too away for our EOF, so we can do a read_exact and not get an
                 // [`std::io::ErrorKind::UnexpectedEof`].
                 let buf: &mut [u8] = unsafe { std::mem::transmute(buffer.spare_capacity_mut()) };
-                log::info!(
-                    "[5] Trying read_exact of {n} bytes at offset {start_offset}",
-                    n = buf.len()
-                );
                 self.file.read_exact(buf)?;
                 // SAFETY: read_size is <= than capacity and data is initialized up to `read_size`
                 unsafe { buffer.set_len(read_size) };
@@ -272,7 +268,6 @@ impl FatCopy {
 
                 // Mark self as done reading
                 self.has_reached_eof = true;
-                log::info!("EOF is reached, will use fast-path for next iteration");
             }
 
             // Now checks hashes
@@ -340,8 +335,8 @@ impl FatCopy {
             if hash_data[..] == hash.hash {
                 true
             } else {
-                log::debug!("Computed: {:02x?}", hash_data.as_slice());
-                log::debug!("Received: {:02x?}", &hash.hash[..]);
+                log::trace!("Computed: {:02x?}", hash_data.as_slice());
+                log::trace!("Received: {:02x?}", &hash.hash[..]);
                 false
             }
         } else {
@@ -383,7 +378,7 @@ impl FatCopy {
             .checked_mul(self.options.bulk_size)
             .expect("u64 Overflow, please deceasing eitehr `bulk_size` or `block_size`");
 
-        log::info!("Using {read_size} buffer size for reads");
+        log::debug!("Using {read_size} buffer size for reads");
         let mut data = vec![0u8; read_size as usize];
 
         // 1. set hashes and maybe data if hash do not match
@@ -397,7 +392,6 @@ impl FatCopy {
             // 2. If new size is smaller, just then the rest of data as chunks
             let n = self.new_filesize - offset;
             if n > 0 {
-                log::info!("[2] Trying read_exact of {n} bytes at offset 0x{offset:x}");
                 self.file.read_exact(&mut data[..n as usize])?;
                 self.send_chunks(&data[..n as usize], offset, stream)?;
             }
@@ -408,7 +402,6 @@ impl FatCopy {
         // 3. New size is bigger, Sends chunks until `self.old_filesize`
         let n = self.old_filesize - offset;
         assert!(n < read_size);
-        log::info!("[3] Trying read_exact of {n} bytes at offset 0x{offset:x}");
         self.file.read_exact(&mut data[..n as usize])?;
         self.send_chunks(&data[..n as usize], offset, stream)?;
         offset += n;

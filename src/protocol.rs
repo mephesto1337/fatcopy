@@ -260,7 +260,7 @@ impl<'a> Wire<'a> for Packet {
         W: Write,
     {
         writer.write_all(&self.buffer[..])?;
-        log::debug!("Serialized Packet of {} bytes", self.buffer.len());
+        log::trace!("Serialized Packet of {} bytes", self.buffer.len());
         Ok(self.buffer.len())
     }
 }
@@ -285,7 +285,7 @@ impl Packet {
             Ok((rest, c)) => {
                 assert!(rest.is_empty());
                 self.offset = SIZE;
-                log::debug!("Got Packet with {c} values");
+                log::trace!("Got Packet with {c} values");
                 Ok(c)
             }
             Err(e) => Err(io::Error::new(
@@ -350,7 +350,6 @@ impl Packet {
         // SAFETY:
         // Read::read_exact only accepts  `&mut [u8]`, not `&mut [MaybeUninit<u8>]`
         let remaining: &mut [u8] = unsafe { std::mem::transmute(self.buffer.spare_capacity_mut()) };
-        log::info!("[4] Trying read_exact of {size} bytes at offset 0x{offset:x}",);
         if let Err(e) = reader.read_exact(&mut remaining[..size]) {
             self.buffer.clear();
             Err(e)
@@ -386,7 +385,7 @@ impl Packet {
         reader.read_exact(&mut self.buffer[..])?;
         let (_, size32) = be_u32::<&[u8], ()>(&self.buffer[..]).unwrap();
         let size: usize = size32.try_into().unwrap();
-        log::debug!("Will receive a {size} bytes packet");
+        log::trace!("Will receive a {size} bytes packet");
         self.buffer.reserve(size);
 
         // SAFETY:
