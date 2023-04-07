@@ -1,7 +1,8 @@
 use std::{
+    fmt::Write,
     io,
     os::{fd::FromRawFd, unix::net::UnixStream},
-    process::{exit, Child, Command},
+    process::{exit, Child, Command, Stdio},
 };
 
 use clap::Parser;
@@ -13,16 +14,19 @@ use nix::{
     },
     unistd::{fork, getpid, ForkResult},
 };
-use ssh_control::{
-    command::{Pipe, SshCommand},
-    SshControl,
-};
+
+mod pipe;
+use pipe::Pipe;
 
 #[derive(Debug, Parser)]
 struct Cli {
     /// Use STDIO mode
     #[arg(long, default_value_t = false)]
     stdio: bool,
+
+    /// Is launch through SSH (internal only)
+    #[arg(long, default_value_t = false)]
+    is_remote_ssh: bool,
 
     /// Block size to use
     #[arg(long, default_value_t = fatcopy::DEFAULT_BLOCK_SIZE, env)]
@@ -31,6 +35,14 @@ struct Cli {
     /// Block size to use
     #[arg(long, default_value_t = fatcopy::DEFAULT_BULK_SIZE, env)]
     bulk_size: u64,
+
+    /// SSH command to use
+    #[arg(
+        short = 'e',
+        long = "rsh",
+        help = "Command will be split on whitespace characters ONLY"
+    )]
+    ssh_command: Option<String>,
 
     /// Remote location for fatcopy
     #[arg(long, default_value = "fatcopy")]
@@ -48,41 +60,56 @@ fn split_on_remote(filename: &str) -> (Option<&str>, &str) {
     }
 }
 
-fn run_ssh_master(hostname: &str) -> io::Result<(Child, String)> {
-    let pid = getpid();
-    let master_path = format!("/tmp/ssh-master-{hostname}-{pid}.sock");
-    let master = Command::new("ssh")
-        .args(&["-o", "ControlPersist=no"][..])
-        .args(&["-o", "ControlMaster=auto"][..])
-        .args(&["-S", &master_path][..])
-        .args(&["-f", "-N", "-n"])
+fn run_through_ssh(
+    ssh_command: Option<&str>,
+    hostname: &str,
+    fatcopy_command: &str,
+) -> io::Result<Child> {
+    let mut command = if let Some(cmd) = ssh_command {
+        let mut parts = cmd.split_whitespace();
+        let mut cmd = Command::new(parts.next().unwrap());
+        for a in parts {
+            cmd.arg(a);
+        }
+        cmd
+    } else {
+        Command::new("ssh")
+    };
+    command
         .arg(hostname)
-        .spawn()?;
-    log::info!("SSH master running with pid {pid}", pid = master.id());
-    std::thread::sleep(std::time::Duration::from_secs(1));
-    Ok((master, master_path))
+        .arg("--")
+        .arg(fatcopy_command)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+
+    command.spawn()
 }
 
-fn prepare_remote_fatcopy(cmdline: String) -> anyhow::Result<SshCommand> {
-    let mut cmd = SshCommand::new(cmdline);
-    cmd.stdin(Pipe::new()?);
-    cmd.stdout(Pipe::new()?);
-    cmd.stderr(Pipe::dev_null()?);
-    if let Ok(val) = std::env::var("RUST_LOG") {
-        cmd.env("RUST_LOG", val);
-    }
-    cmd.env("IS_REMOTE", "true");
-    Ok(cmd)
+fn prepare_remote_fatcopy(source: &str, destination: &str, args: &Cli) -> String {
+    let mut command = String::new();
+    write!(
+        &mut command,
+        "{} --stdio --is-remote-ssh",
+        args.remote_binary
+    )
+    .unwrap();
+    write!(&mut command, "--block-size={} ", args.block_size).unwrap();
+    write!(&mut command, "--bulk-size={} ", args.bulk_size).unwrap();
+    write!(&mut command, "'{}' ", source.replace('\'', "'\\''")).unwrap();
+    write!(&mut command, "'{}'", destination.replace('\'', "'\\''")).unwrap();
+    command
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() -> io::Result<()> {
+    let args = Cli::parse();
     let mut builder = env_logger::builder();
 
     builder
         .parse_default_env()
         .target(env_logger::Target::Stderr);
 
-    if std::env::var("IS_REMOTE").is_ok() {
+    if args.is_remote_ssh {
         builder.format(|buf, record| {
             use std::io::Write;
 
@@ -112,27 +139,44 @@ fn main() -> anyhow::Result<()> {
     }
 
     builder.init();
-    let args = Cli::parse();
 
     let options = fatcopy::Options {
         block_size: args.block_size,
         bulk_size: args.bulk_size,
     };
 
+    match options.block_size.checked_mul(args.block_size) {
+        None => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "block-size * bulk-size would overflow",
+            ))
+        }
+        Some(read_size) => {
+            if read_size > fatcopy::MAXIMUM_READ_SIZE {
+                log::warn!(
+                    "block-size * bulk-size is over 0x{:x} (maximum read size)",
+                    fatcopy::MAXIMUM_READ_SIZE
+                );
+            }
+        }
+    }
+
     if args.stdio {
         // We are launch through SSH
         if args.source == "-" {
-            let mut fatcopy = FatCopy::new_with_options(&args.destination, options.clone())?;
+            let mut fatcopy = FatCopy::new_with_options(&args.destination, options)?;
             let mut stdio = Pipe::stdio();
             fatcopy.recv(&mut stdio)?;
         } else if args.destination == "-" {
-            let mut fatcopy = FatCopy::new_with_options(&args.source, options.clone())?;
+            let mut fatcopy = FatCopy::new_with_options(&args.source, options)?;
             let mut stdio = Pipe::stdio();
             fatcopy.send(&mut stdio)?;
         } else {
-            anyhow::bail!(
-                "When runned with `--stdio` either source or destination must be set to `-`"
-            );
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "When runned with `--stdio` either source or destination must be set to `-`",
+            ));
         }
         Ok(())
     } else {
@@ -147,7 +191,10 @@ fn main() -> anyhow::Result<()> {
             split_on_remote(&args.destination),
         ) {
             ((Some(_), _), (Some(_), _)) => {
-                anyhow::bail!("At most one of source and destination can be a remote destination");
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "At most one of source and destination can be a remote destination",
+                ));
             }
             ((None, source), (None, destination)) => {
                 let (a, b) = socketpair(
@@ -174,44 +221,26 @@ fn main() -> anyhow::Result<()> {
                 }
             }
             ((None, source), (Some(hostname), destination)) => {
-                let (mut master, master_path) = run_ssh_master(hostname)?;
-                let mut ctrl = SshControl::new(master_path)?;
-                let dst = prepare_remote_fatcopy(format!(
-                    "{bin} --stdio - {destination}",
-                    bin = &args.remote_binary
-                ))?;
-                let mut fatcopy = ctrl.new_session(dst)?;
-                let (stdin, stdout) = (
-                    fatcopy.stdin.take().unwrap(),
-                    fatcopy.stdout.take().unwrap(),
-                );
-                let mut stdio = Pipe::with_pipes(stdout, stdin);
+                let remote_command = prepare_remote_fatcopy(source, destination, &args);
+                let mut ssh =
+                    run_through_ssh(args.ssh_command.as_deref(), hostname, &remote_command)?;
+                let mut stdio = Pipe::from_child(&mut ssh).unwrap();
                 let mut src = FatCopy::new_with_options(source, options)?;
                 src.register_callback(callback);
 
                 src.send(&mut stdio)?;
-                ctrl.wait(&fatcopy)?;
-                master.kill()?;
+                ssh.wait()?;
             }
             ((Some(hostname), source), (None, destination)) => {
-                let (mut master, master_path) = run_ssh_master(hostname)?;
-                let mut ctrl = SshControl::new(master_path)?;
-                let src = prepare_remote_fatcopy(format!(
-                    "{bin} --stdio {source} - ",
-                    bin = &args.remote_binary
-                ))?;
-                let mut fatcopy = ctrl.new_session(src)?;
-                let (stdin, stdout) = (
-                    fatcopy.stdin.take().unwrap(),
-                    fatcopy.stdout.take().unwrap(),
-                );
-                let mut stdio = Pipe::with_pipes(stdout, stdin);
-                let mut dst = FatCopy::new_with_options(destination, options)?;
+                let remote_command = prepare_remote_fatcopy(source, destination, &args);
+                let mut ssh =
+                    run_through_ssh(args.ssh_command.as_deref(), hostname, &remote_command)?;
+                let mut stdio = Pipe::from_child(&mut ssh).unwrap();
+                let mut dst = FatCopy::new_with_options(source, options)?;
                 dst.register_callback(callback);
 
                 dst.recv(&mut stdio)?;
-                ctrl.wait(&fatcopy)?;
-                master.kill()?;
+                ssh.wait()?;
             }
         }
         println!();

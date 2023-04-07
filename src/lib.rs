@@ -15,8 +15,8 @@ pub const DEFAULT_BLOCK_SIZE: u64 = 4096;
 /// Maximum read size on Linux according to man (2) read.
 pub const MAXIMUM_READ_SIZE: u64 = 0x7fff_f000;
 
-/// Default block to maximize reads' size.
-pub const DEFAULT_BULK_SIZE: u64 = MAXIMUM_READ_SIZE / DEFAULT_BLOCK_SIZE;
+/// Default number of blocks to read at once
+pub const DEFAULT_BULK_SIZE: u64 = 256;
 
 mod protocol;
 use protocol::{Ack, AckResult, Data, FileSize, Packet, Wire};
