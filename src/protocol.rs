@@ -326,7 +326,7 @@ impl Packet {
 
         self.buffer[value_size_offset..][..SIZE].copy_from_slice(&size32.to_be_bytes()[..]);
         self.set_total_size();
-        log::debug!(
+        log::trace!(
             "Added {value:?}, buffer increased of {} bytes ({value_size_offset} -> {})",
             self.buffer.len() - value_size_offset,
             self.buffer.len()
@@ -350,17 +350,26 @@ impl Packet {
         // SAFETY:
         // Read::read_exact only accepts  `&mut [u8]`, not `&mut [MaybeUninit<u8>]`
         let remaining: &mut [u8] = unsafe { std::mem::transmute(self.buffer.spare_capacity_mut()) };
-        if let Err(e) = reader.read_exact(remaining) {
+        log::info!("[4] Trying read_exact of {size} bytes at offset 0x{offset:x}",);
+        if let Err(e) = reader.read_exact(&mut remaining[..size]) {
             self.buffer.clear();
             Err(e)
         } else {
             // SAFETY:
             // Read succeed, so data is initialized
+            let old_len = self.buffer.len();
             unsafe {
-                self.buffer.set_len(SIZE + size);
+                self.buffer.set_len(old_len + size);
             }
             self.set_total_size();
             Ok(())
+        }
+    }
+
+    pub fn get_data(&self) -> io::Result<Data<'_>> {
+        match Data::deserialize(&self.buffer[self.offset..]) {
+            Ok((_, d)) => Ok(d),
+            Err(e) => Err(io::Error::new(io::ErrorKind::InvalidData, format!("{e:?}"))),
         }
     }
 

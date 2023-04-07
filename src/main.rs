@@ -78,16 +78,37 @@ fn prepare_remote_fatcopy(cmdline: String) -> anyhow::Result<SshCommand> {
 fn main() -> anyhow::Result<()> {
     let mut builder = env_logger::builder();
 
-    builder.parse_default_env();
+    builder
+        .parse_default_env()
+        .target(env_logger::Target::Stderr);
 
     if std::env::var("IS_REMOTE").is_ok() {
         builder.format(|buf, record| {
             use std::io::Write;
-            writeln!(buf, "SSH {}: {}", record.level(), record.args())
+
+            let ts = buf.timestamp_millis();
+            let level = buf.default_styled_level(record.level());
+            write!(buf, "SSH   [{} {:<5}", ts, level)?;
+            if let Some(p) = record.module_path() {
+                writeln!(buf, " {}] {}", p, record.args())?;
+            } else {
+                writeln!(buf, "] {}", record.args())?;
+            }
+            Ok(())
         });
-        builder.target(env_logger::Target::Stderr);
     } else {
-        builder.target(env_logger::Target::Stderr);
+        builder.format(|buf, record| {
+            use std::io::Write;
+
+            let ts = buf.timestamp_millis();
+            write!(buf, "{:<5} [{} {:<5}", getpid(), ts, record.level())?;
+            if let Some(p) = record.module_path() {
+                writeln!(buf, " {}] {}", p, record.args())?;
+            } else {
+                writeln!(buf, "] {}", record.args())?;
+            }
+            Ok(())
+        });
     }
 
     builder.init();
