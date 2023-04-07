@@ -402,9 +402,11 @@ impl FatCopy {
         // 3. New size is bigger, Sends chunks until `self.old_filesize`
         let n = self.old_filesize - offset;
         assert!(n < read_size);
-        self.file.read_exact(&mut data[..n as usize])?;
-        self.send_chunks(&data[..n as usize], offset, stream)?;
-        offset += n;
+        if n > 0 {
+            self.file.read_exact(&mut data[..n as usize])?;
+            self.send_chunks(&data[..n as usize], offset, stream)?;
+            offset += n;
+        }
 
         log::debug!("Will only send data for now on (offset=0x{offset:})");
         // 4. Just send data for now on
