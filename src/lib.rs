@@ -413,6 +413,7 @@ impl FatCopy {
         self.send_chunks(&data[..n as usize], offset, stream)?;
         offset += n;
 
+        log::debug!("Will only send data for now on (offset=0x{offset:})");
         // 4. Just send data for now on
         while offset + read_size < self.new_filesize {
             self.packet
@@ -427,10 +428,6 @@ impl FatCopy {
 
         // 5. Sends the rest
         if offset < self.new_filesize {
-            log::info!(
-                "offset=0x{offset:x}, new_filesize=0x{:x}",
-                self.new_filesize
-            );
             let n = self.new_filesize - offset;
             self.packet.set_data(offset, n as usize, &mut self.file)?;
             self.packet.serialize(stream)?;
@@ -465,6 +462,7 @@ impl FatCopy {
         }
 
         // 3. Now we will only receive data
+        log::debug!("Should not receive any hashes for now on (offset=0x{offset:})");
 
         // 3.a Checks than offset and file position are in sync
         #[cfg(debug_assertions)]
