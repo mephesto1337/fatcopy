@@ -361,13 +361,20 @@ impl Packet {
             unsafe {
                 self.buffer.set_len(old_len + size);
             }
+            let data_size = self.buffer.len() - 2 * SIZE;
+            let data_size32: u32 = data_size
+                .try_into()
+                .expect("Cannot serialize packets of 4GB+ data");
+
+            self.buffer[SIZE..][..SIZE].copy_from_slice(&data_size32.to_be_bytes()[..]);
             self.set_total_size();
             Ok(())
         }
     }
 
     pub fn get_data(&self) -> io::Result<Data<'_>> {
-        match Data::deserialize(&self.buffer[self.offset..]) {
+        let (_, data_buf) = length_data(be_u32::<&[u8], ()>)(&self.buffer[self.offset..]).unwrap();
+        match Data::deserialize(data_buf) {
             Ok((_, d)) => Ok(d),
             Err(e) => Err(io::Error::new(io::ErrorKind::InvalidData, format!("{e:?}"))),
         }

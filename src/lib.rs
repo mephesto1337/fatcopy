@@ -475,7 +475,7 @@ impl FatCopy {
         }
         while offset < self.new_filesize {
             self.packet.recv_next_bulk(stream)?;
-            let data = self.packet.get_next::<Data>()?.unwrap();
+            let data = self.packet.get_data()?;
 
             assert_eq!(offset, data.offset);
 
