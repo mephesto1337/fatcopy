@@ -123,7 +123,7 @@ fn main_helper() -> io::Result<()> {
 
             let ts = buf.timestamp_millis();
             let level = buf.default_styled_level(record.level());
-            write!(buf, "SSH   [{} {:<5}", ts, level)?;
+            write!(buf, "SSH    [{} {:<5}", ts, level)?;
             if let Some(p) = record.module_path() {
                 writeln!(buf, " {}] {}", p, record.args())?;
             } else {
@@ -136,7 +136,7 @@ fn main_helper() -> io::Result<()> {
             use std::io::Write;
 
             let ts = buf.timestamp_millis();
-            write!(buf, "{:<5} [{} {:<5}", getpid(), ts, record.level())?;
+            write!(buf, "{:<6} [{} {:<5}", getpid(), ts, record.level())?;
             if let Some(p) = record.module_path() {
                 writeln!(buf, " {}] {}", p, record.args())?;
             } else {
