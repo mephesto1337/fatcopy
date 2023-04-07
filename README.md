@@ -51,10 +51,14 @@ To send a 1GB file between 2 PCs (disks speed does not count as they were stored
 
 For reference here is some speeds:
 
-`cat file | ssh host 'cat > file'`:  9.244s / 886.20 Mbit/s
-`cat file > /dev/tcp/1.2.3.4/1337`:  9.110s / 899.24 Mbit/s
-`rsync --inplace file host:file`  : 10.872s / 753.50 Mbit/s (files were 99.99% similar)
-`rsync --inplace file host:file`  :  0.054s / over 9000 Mbit/s (files were 100% similar)
+| Command run                                       | Time (in seconds) | Speed (Mbit/s) |
+|---------------------------------------------------|-------------------|----------------|
+| `cat file \| ssh host 'cat > file'`               |  9.244            | 886.20         |
+| `cat file > /dev/tcp/1.2.3.4/1337`                |  9.110            | 899.24         |
+| `rsync --inplace file host:same-file-at-99.99`    | 10.872            | 753.50         | 
+| `rsync --inplace file host:same-file`             |  0.054            | A lot          |
+
+Here are the results:
 
 | Description of remote file  | Time (in seconds) | Speed (Mbit/s) |
 |-----------------------------|-------------------|----------------|
